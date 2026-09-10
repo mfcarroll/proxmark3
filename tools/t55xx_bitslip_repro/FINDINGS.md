@@ -117,3 +117,38 @@ Behaviour split cleanly by silicon, not by coupling as first assumed:
 - **Score shifts and inversions, not just rotations.** A demod that opens a bit early pads with zero
   rather than wrapping, and psk can return a complemented word. Both arrived as `UNEXPLAINED` before
   the classifier was taught them, which hid one fault and made another look like a regression.
+
+
+## The 160 fallback — diagnosed, and two fixes for it measured flat
+
+`pskRawDemod_ext` falls back to `firstFullWave = 160` when no phase shift is found, under a comment
+saying it does not matter where you start because the word must be all ones or all zeros. That is only
+true when the word really has no transitions. When it merely has few — `80000000`, `00000001` — a shift
+does exist, was missed, and the `firstFullWave / clk` bits emitted for the skipped region rotate the
+word by exactly that many.
+
+The improved writetest harness found it in one run. Rotation size tracks the bit rate:
+
+| bit rate | observed | round(160 / clk) |
+|---|---|---|
+| RF/32 | ror5 | 5 |
+| RF/40 | ror4 | 4 |
+| RF/50 | ror3 | 3 |
+| RF/64 | ror3 | 2 or 3 (160/64 = 2.5) |
+| RF/100 | ror2 | 2 |
+
+**Neither attempted fix is justified by measurement, so neither was committed.**
+
+*Emit nothing for the skipped region in the no-shift case only.* One run looked like a win — three
+configurations went to 4/4. Interleaved A/B, two runs each: 29 and 30 blocks against 23 and 39. The
+mean is marginally higher and the variance is far worse, which is not an improvement.
+
+*Emit nothing anywhere, and anchor on the shift.* Clearly worse: rotations grew from ror5 to ror12 and
+ror13. Same failure as the earlier attempt at this, and the reason is now clear — **the fabricated bits
+are coupled to the anchor**. They hold `startIdx` near sample 0, which is what the t55xx sample-space
+anchor then resolves against. Remove them and that coupling breaks.
+
+For the no-shift case there is genuinely no information about where the word begins, so 160 is as
+defensible as any constant and the existing behaviour is at least self-consistent. Fixing this properly
+means knowing the true word boundary, which is the whole of #3512. Do not attempt it again without a
+new idea about where that boundary comes from.
