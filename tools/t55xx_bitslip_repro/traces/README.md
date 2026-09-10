@@ -34,13 +34,23 @@ that, so `dump` has no offline test either.
 | `t55xx_fsk2a_onewave_leadin_a/b` | FSK2a, rf/50 | `--fs` | A leading run of a single subcarrier wave, rounded to zero bits and then forced to one. The post-fix stream is exactly the pre-fix stream shifted left by one — the fabricated bit removed. Two of fourteen captures showed it. |
 | `t55xx_psk1_clean` | PSK1, rf/32 | `--p1` | A control. Demodulates identically on every build; useful for confirming a change is targeted rather than global. |
 
-## Not represented: the psk1 residual
+## The psk1 inversion — matched pair
 
-PSK1 on ICR 0 silicon still returns a whole-word inversion on roughly a tenth of reads, and **no trace
-here reproduces it**. Forty consecutive `read -b 0` captures were taken on a tag that inverts during
-`lf t55xx dump`, and not one of them differed between builds — so the fault appears to depend on field
-state across a read sequence rather than on the samples of a single acquisition alone.
+| trace | flag | first 32 bits demodulated |
+|---|---|---|
+| `t55xx_psk1_notinverted_a/b` | `--p1` | `99699696` — exactly the word written to block 6 |
+| `t55xx_psk1_inverted_a/b` | `--p1` | `B34B34B4`, which is `complement(99699696) ror1` |
 
-Capturing it needs the data-block reads of a dump sequence saved individually and scored against a
-known payload, keeping the ones that come back complemented. Until that exists, that fault cannot be
-worked on offline.
+All four are reads of **the same block, on the same tag, in the same PSK1 configuration**, taken
+minutes apart in one command sequence. Two invert and two do not, so they isolate the fault to the
+samples and nothing else — the inversion reproduces on replay, with no hardware.
+
+Capturing these needed the read sequence a dump performs, not a loop of block 0 reads. Block 0
+re-anchors against its own known value on every read (`t55xx_stream_holds` in `cmdlft55xx.c`), so a
+block 0 capture self-corrects and can never show the fault: forty consecutive block 0 reads on this
+same tag produced not one difference between builds. It is the **data** block reads that carry it, and
+only when block 0 has been read first to set the anchor, as `lf t55xx dump` does.
+
+PSK1 on ICR 0 silicon returns a whole-word inversion on roughly a tenth of reads. As of these traces
+the cause is localised to the first emitted bit: `dest[numBits++] = curPhase` asserts a bit at the
+anchor that need not sit on a true bit boundary, and the next real transition re-syncs the remainder.
