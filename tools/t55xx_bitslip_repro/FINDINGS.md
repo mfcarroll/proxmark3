@@ -59,6 +59,21 @@ The seed was never the cause. The clue was available beforehand and ignored: the
 inversion — but replaced them with single-bit errors, always the top bit, at the same rate. Reverted:
 a flipped MSB is equally wrong and *less* likely to be noticed than an inverted word.
 
+## Both psk hunks are needed — checked, not assumed
+
+The two psk changes look like one could subsume the other: the partial-wave fix acts inside
+`pskFindFirstPhaseShift`, which is what produces the early locks the lead-in guard in
+`pskRawDemod_ext` was written to reject. Offline it looks redundant — across 82 saved psk1 captures,
+removing the guard changes **no** full demod buffer at all.
+
+It is not redundant. On the tag whose original fault was the early lock, removing the guard returns
+46/46, 45/45, 39/51 and 52/52 corrupted fields over four rounds, and 20/130 on a full sweep. With it,
+the same tag is 0/66 every round and 0/132 on the sweep.
+
+The offline captures were all taken on a *different* tag and *after* the partial-wave fix, so not one
+of them carried the fault the guard exists for. **Offline evidence covers only the fault modes the
+captures happen to contain** — worth remembering before dropping anything on the strength of it.
+
 ## Self-consistency: an idea that cannot work
 
 A block read repeats its word about eleven times per buffer, so a mid-stream phase flip would show as
