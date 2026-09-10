@@ -14,8 +14,11 @@ version, from `--pm3 ... --version`), so a per-silicon set of files needs no rec
 
 WHAT IT MEASURES. Write a known non-byte-periodic payload, put the tag in ASK/Manchester and dump it for
 GROUND TRUTH, then set each modulation in turn and dump twice. Every field of every dump is classified
-against all 31 rotations of the truth-dump value. A byte-periodic payload would hide the bug (it lands on
-itself under many rotations), which is why the payload below is deliberately irregular.
+against every rotation, shift and inversion of the truth-dump value. A byte-periodic payload would hide
+the bug (it lands on itself under many rotations), which is why the payload below is deliberately
+irregular. Shifts and inversions are scored because both were mistaken for noise: the nrz slip drops a
+bit and pads with zero rather than wrapping it, and psk can return the whole word complemented, which is
+a polarity fault rather than a slip and needs saying so.
 
 ⭐ WHY A TRUTH DUMP RATHER THAN THE INTENDED VALUES. Scoring against what you MEANT to write is wrong twice
 over: some tags have permanently-unwritable blocks that read back 00000000 while `write` reports success
@@ -65,21 +68,59 @@ CONFIGS = {
 SLIPPING_ON_ARRIVAL = ("PSK", "NRZ", "DIRECT")
 
 
+INVERT = 0xFFFFFFFF
+
+
 def rots(v):
     return {n: ((v << n) | (v >> (32 - n))) & 0xFFFFFFFF for n in range(1, 32)}
 
 
+def boundaries(v):
+    """label -> value for every word boundary error a demodulation can make.
+
+    Rotations first, so a value that is both keeps the label it has always had.  Shifts matter because
+    a demodulation that opens a bit early or late drops a bit off one end and pads the other with zero
+    rather than wrapping it -- scoring those as UNEXPLAINED is what hid the nrz slip."""
+    out, r = {}, rots(v)
+    for n in range(1, 32):
+        out[f"rol{n}"] = r[n]
+        out[f"ror{n}"] = r[32 - n]
+    for n in range(1, 9):
+        out[f"shl{n}"] = (v << n) & 0xFFFFFFFF
+        out[f"shr{n}"] = (v >> n) & 0xFFFFFFFF
+    return out
+
+
+def unscorable(truth):
+    """A word equal to every one of its own rotations -- 00000000 and FFFFFFFF -- carries no boundary
+    information, because every offset into it reads the same.  A mismatch against it cannot be called a
+    slip, and counting one would misstate the rate.  Page 1 block 3 reads 00000000 on a healthy tag,
+    which is how a block that is not even memory came to look like corruption in every psk arm."""
+    return len(set(rots(truth).values()) | {truth}) == 1
+
+
 def classify(truth, got):
-    """`got` vs every rotation of `truth`. Returns 'correct', 'rolN', 'rorN', or 'UNEXPLAINED'."""
+    """`got` vs every rotation, shift and inversion of `truth`.  Returns 'correct', a boundary label
+    ('rolN'/'rorN'/'shlN'/'shrN'), 'inverted', 'inverted+<label>', or 'UNEXPLAINED'."""
     if got == truth:
         return "correct"
-    r = rots(truth)
-    for n in range(1, 32):
-        if got == r[n]:
-            return f"rol{n}"
-        if got == r[32 - n]:
-            return f"ror{n}"
+    for label, v in boundaries(truth).items():
+        if got == v:
+            return label
+    # psk carries no absolute phase, so the demodulator picks one and can pick the opposite, which
+    # complements the whole word.  That is a polarity fault, not a boundary fault, and reporting it as
+    # a slip -- or as UNEXPLAINED -- says the wrong thing about which demodulator is at fault
+    inv = got ^ INVERT
+    if inv == truth:
+        return "inverted"
+    for label, v in boundaries(truth).items():
+        if inv == v:
+            return f"inverted+{label}"
     return "UNEXPLAINED"
+
+
+def score(truth, got):
+    return "unscorable" if unscorable(truth) else classify(truth, got)
 
 
 def build_cmd(configs, dumps, restore):
@@ -215,14 +256,14 @@ def analyse(dumps, detects, writes, configs, ndumps):
             # block 0 (both pages mirror it) is the config word we wrote, not the truth dump's
             for pg in ("p0", "p1"):
                 if 0 in d.get(pg, {}):
-                    cells[f"{pg}b0"] = classify(cfgv, d[pg][0])
+                    cells[f"{pg}b0"] = score(cfgv, d[pg][0])
             for b in range(1, 8):
                 if b in d.get("p0", {}) and b in truth.get("p0", {}):
                     cells[f"p0b{b}"] = ("dead" if b in dead
-                                        else classify(truth["p0"][b], d["p0"][b]))
+                                        else score(truth["p0"][b], d["p0"][b]))
             for b in (1, 2, 3):
                 if b in d.get("p1", {}) and b in truth.get("p1", {}):
-                    cells[f"p1b{b}"] = classify(truth["p1"][b], d["p1"][b])
+                    cells[f"p1b{b}"] = score(truth["p1"][b], d["p1"][b])
             arm.append(cells)
             rows.append((name, k + 1, cells))
         per_arm[name] = arm
@@ -231,23 +272,30 @@ def analyse(dumps, detects, writes, configs, ndumps):
 
 def summarise(rows):
     """Dead blocks are excluded from the denominator: they hold nothing, so they can be neither correct
-    nor corrupted, and counting them either way would misstate the slip rate."""
-    tot = slipped = deadn = 0
-    kinds, unexplained = {}, 0
+    nor corrupted, and counting them either way would misstate the slip rate.  Unscorable fields are
+    excluded for the same reason -- see unscorable()."""
+    tot = slipped = deadn = unscn = 0
+    kinds, unexplained, inverted = {}, 0, 0
     for _, _, cells in rows:
         for v in cells.values():
             if v == "dead":
                 deadn += 1
+                continue
+            if v == "unscorable":
+                unscn += 1
                 continue
             tot += 1
             if v == "correct":
                 continue
             if v == "UNEXPLAINED":
                 unexplained += 1
+            if v.startswith("inverted"):
+                inverted += 1
             slipped += 1
             kinds[v] = kinds.get(v, 0) + 1
     return {"fields": tot, "slipped": slipped, "unexplained": unexplained,
-            "rotations": kinds, "dead_fields_excluded": deadn}
+            "inverted": inverted, "verdicts": kinds,
+            "dead_fields_excluded": deadn, "unscorable_fields_excluded": unscn}
 
 
 def intermittency(per_arm):
@@ -259,7 +307,7 @@ def intermittency(per_arm):
             continue
         keys = set().union(*[set(a) for a in arm])
         differ = sorted(k for k in keys
-                        if "dead" not in {a.get(k) for a in arm}
+                        if not ({"dead", "unscorable"} & {a.get(k) for a in arm})
                         and len({a.get(k) for a in arm}) > 1)
         out[name] = differ
     return out
@@ -269,13 +317,15 @@ def fields_scored(rows):
     """Live fields per config. A config with zero is NOT clean -- it produced no readable blocks."""
     out = {}
     for name, _k, cells in rows:
-        out[name] = out.get(name, 0) + len([v for v in cells.values() if v != "dead"])
+        out[name] = out.get(name, 0) + len([v for v in cells.values()
+                                                    if v not in ("dead", "unscorable")])
     return out
 
 
 def print_summary(tag, summ, inter, rows):
     print(f"\n[{tag}] {summ['slipped']} of {summ['fields']} fields corrupted; "
-          f"rotations {summ['rotations'] or 'none'}; unexplained {summ['unexplained']}")
+          f"verdicts {summ['verdicts'] or 'none'}; inverted {summ['inverted']}; "
+          f"unexplained {summ['unexplained']}")
     scored = fields_scored(rows)
     for n, d in inter.items():
         if not scored.get(n):
@@ -322,8 +372,13 @@ def write_report(tag, configs, ndumps, transcript, gen, dumps, detects, writes, 
             ("ok" if cells.get(f) == "correct" else f"**{cells.get(f,'-')}**") for f in fields) + " |")
     L += ["", "## Summary", "",
           f"- **{summ['slipped']} of {summ['fields']} fields corrupted**",
-          f"- rotations observed: {summ['rotations'] or 'none'}",
-          f"- unexplained (not any rotation): **{summ['unexplained']}**", ""]
+          f"- verdicts observed: {summ['verdicts'] or 'none'}",
+          f"- inverted (whole word complemented — a psk polarity fault, not a slip): "
+          f"**{summ['inverted']}**",
+          f"- unexplained (not any rotation, shift or inversion): **{summ['unexplained']}**",
+          f"- excluded: {summ['dead_fields_excluded']} dead, "
+          f"{summ['unscorable_fields_excluded']} unscorable (a truth of 00000000/FFFFFFFF reads the "
+          f"same at every offset, so it can neither confirm nor deny a slip)", ""]
     scored = fields_scored(rows)
     for name, differ in inter.items():
         if not scored.get(name):
@@ -432,12 +487,34 @@ def main():
         rows, per_arm, dead = res
         assert dead == [4], f"expected block 4 dead, got {dead}"
         summ = summarise(rows)
-        assert summ["slipped"] == 1 and summ["rotations"] == {"rol1": 1}, summ
+        assert summ["slipped"] == 1 and summ["verdicts"] == {"rol1": 1}, summ
         assert summ["dead_fields_excluded"] == 2, summ
+        # p1b3 is 00000000: unscorable, and must be out of the denominator rather than counted wrong
+        assert summ["unscorable_fields_excluded"] == 2, summ
         inter = intermittency(per_arm)
         assert inter["fsk2a-mb6"] == ["p0b1"], inter
-        assert fields_scored(rows) == {"fsk2a-mb6": 22}, fields_scored(rows)
+        assert fields_scored(rows) == {"fsk2a-mb6": 20}, fields_scored(rows)
         print_summary("self-test", summ, inter, rows)         # exercises the console summary path
+
+        # every verdict the classifier can reach, against known answers
+        t = pay[1]
+        assert classify(t, t) == "correct"
+        assert classify(t, rol(t, 1)) == "rol1", classify(t, rol(t, 1))
+        assert classify(t, rol(t, 31)) == "ror1", classify(t, rol(t, 31))
+        # A shift drops a bit off one end and pads the other with zero; a rotation wraps it.  They are
+        # only distinguishable when the bit being lost is a 1, so this needs BOTH ends set -- with an
+        # msb of 0, shl1 and rol1 are the same word and the rotation label is the right answer
+        sh = 0x93579BDF
+        assert classify(sh, sh >> 1) == "shr1", classify(sh, sh >> 1)
+        assert classify(sh, (sh << 1) & 0xFFFFFFFF) == "shl1", classify(sh, (sh << 1) & 0xFFFFFFFF)
+        assert classify(0x13579BDF, (0x13579BDF << 1) & 0xFFFFFFFF) == "rol1"   # msb 0: indistinguishable
+        assert classify(t, t ^ INVERT) == "inverted", classify(t, t ^ INVERT)
+        assert classify(t, rol(t, 5) ^ INVERT) == "inverted+rol5", classify(t, rol(t, 5) ^ INVERT)
+        assert classify(t, 0x0BADF00D) == "UNEXPLAINED", classify(t, 0x0BADF00D)
+        assert unscorable(0x00000000) and unscorable(0xFFFFFFFF)
+        assert not unscorable(t)
+        # and the fault these were added for: an inverted word must NOT read as a slip
+        assert not classify(t, t ^ INVERT).startswith(("rol", "ror", "shl", "shr"))
 
         # the structural guard: an extra dump beyond want+1 (the restore slot) must be rejected
         _, e_long = analyse(synth + [arm(0), arm(0)], ["x"], [], ["fsk2a-mb6"], 2)
@@ -450,8 +527,9 @@ def main():
         res_e, err_e = analyse(empty, ["x"], [], ["fsk2a-mb6"], 2)
         assert err_e is None and fields_scored(res_e[0]) == {"fsk2a-mb6": 0}, fields_scored(res_e[0])
 
-        print("  parse round-trip, classification, dead-block exclusion, intermittency, the structural")
-        print("  guard and the zero-field case all behave on synthetic data.")
+        print("  parse round-trip, classification (rotation, shift, inversion), dead-block and")
+        print("  unscorable exclusion, intermittency, the structural guard and the zero-field case")
+        print("  all behave on synthetic data.")
         print("  \u2705 self-test PASS")
         return
 
@@ -460,8 +538,17 @@ def main():
         m = re.search(r"```\n(.*?)\n```", txt, re.S)
         body = m.group(1) if m and "pm3 -->" in m.group(1) else txt
         dumps, detects, writes = parse(body)
-        cfgs = [c.strip() for c in a.configs.split(",")]
-        res, err = analyse(dumps, detects, writes, cfgs, a.dumps)
+        # the report records which arms it ran and how many dumps each; scoring a saved run against
+        # whatever --configs happens to default to would misalign every positional index
+        hdr = re.search(r"\*\*configs\*\*: (.+?)\s+\*\*dumps per config\*\*: (\d+)", txt)
+        if hdr:
+            cfgs = [c.strip() for c in hdr.group(1).split(",")]
+            ndumps = int(hdr.group(2))
+        else:
+            cfgs = [c.strip() for c in a.configs.split(",")]
+            ndumps = a.dumps
+        print(f"re-analysing {len(cfgs)} arm(s) x {ndumps} dump(s): {', '.join(cfgs)}")
+        res, err = analyse(dumps, detects, writes, cfgs, ndumps)
         if err:
             sys.exit("cannot score: " + err)
         print(json.dumps(summarise(res[0]), indent=1))

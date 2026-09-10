@@ -13,8 +13,23 @@ This script measures the effect systematically on one tag at a time.
 
 For a tag on the antenna, it: writes a known non-byte-periodic payload; sets ASK/Manchester and dumps to
 establish ground truth (Manchester has a deterministic demod start and is clean); then sets each
-modulation in turn and dumps twice. Every field of every dump is classified against all 31 rotations of
-the truth-dump value. It restores the tag's arrival state at the end and verifies the restore.
+modulation in turn and dumps twice. Every field of every dump is classified against every rotation,
+shift and inversion of the truth-dump value. It restores the tag's arrival state at the end and verifies
+the restore.
+
+Three verdicts matter and they are different faults:
+
+- **`rolN` / `rorN` / `shlN` / `shrN`** — a bit slip. The word boundary moved. A shift rather than a
+  rotation means the demodulation opened a bit early or late, dropping a bit off one end and padding the
+  other with zero.
+- **`inverted`, `inverted+rolN`** — the whole word came back complemented. psk carries no absolute
+  phase, so the demodulator picks one and can pick the opposite. That is a **polarity** fault, not a
+  boundary fault, and calling it a slip points at the wrong demodulator.
+- **`UNEXPLAINED`** — none of the above. Now genuinely rare; if you see many, suspect the tooling.
+
+Fields whose truth value is `00000000` or `FFFFFFFF` are reported `unscorable` and excluded, the same
+way dead blocks are: a word equal to all of its own rotations reads the same at every offset, so it can
+neither confirm nor deny a slip. Page 1 block 3 is the usual one.
 
 It writes a `.md` report and a `.json` beside itself, both naming the tag and the exact client version.
 
