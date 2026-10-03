@@ -4098,6 +4098,19 @@ static void PacketReceived(PacketCommandNG *packet) {
             SendCapabilities();
             break;
         }
+#ifndef CHIP_AT32F435_37   // the PIT is AT91 only (CHIP_AT91SAM7S isn't defined on every AT91 build)
+        case CMD_EXP_PIT_READ: {
+            // EXPERIMENT: the PIT runs from MCK/16 (3 MHz, derived from the 16 MHz crystal) and
+            // nothing else uses it. With PIV at its maximum, PIIR's PICNT:CPIV is a free-running
+            // 32-bit count (wraps every ~1432 s). Reading PIIR doesn't reset anything.
+            if ((AT91C_BASE_PITC->PITC_PIMR & AT91C_PITC_PITEN) == 0) {
+                AT91C_BASE_PITC->PITC_PIMR = AT91C_PITC_PITEN | AT91C_PITC_PIV;
+            }
+            uint32_t piir = AT91C_BASE_PITC->PITC_PIIR;
+            reply_ng(CMD_EXP_PIT_READ, PM3_SUCCESS, (uint8_t *)&piir, sizeof(piir));
+            break;
+        }
+#endif
         case CMD_PING: {
             reply_ng(CMD_PING, PM3_SUCCESS, packet->data.asBytes, packet->length);
             break;

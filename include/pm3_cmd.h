@@ -822,6 +822,7 @@ typedef struct {
 #define CMD_VERSION 0x0107
 #define CMD_STATUS 0x0108
 #define CMD_PING 0x0109
+#define CMD_EXP_PIT_READ 0x01F0 // EXPERIMENT (exp/pit-clock-probe): free-running PIT counter, for crystal-vs-host timing
 #define CMD_DOWNLOAD_EML_BIGBUF 0x0110
 #define CMD_DOWNLOADED_EML_BIGBUF 0x0111
 #define CMD_CAPABILITIES 0x0112

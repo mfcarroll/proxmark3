@@ -1574,6 +1574,22 @@ static int CmdTimeout(const char *Cmd) {
     return PM3_SUCCESS;
 }
 
+// EXPERIMENT (exp/pit-clock-probe): read the device's free-running PIT count (3 MHz from the crystal).
+static int CmdPit(const char *Cmd) {
+    (void)Cmd;
+    clearCommandBuffer();
+    SendCommandNG(CMD_EXP_PIT_READ, NULL, 0);
+    PacketResponseNG resp;
+    if (WaitForResponseTimeout(CMD_EXP_PIT_READ, &resp, 1000) == false || resp.length != 4) {
+        PrintAndLogEx(WARNING, "no PIT reply");
+        return PM3_ETIMEOUT;
+    }
+    uint32_t piir;
+    memcpy(&piir, resp.data.asBytes, 4);
+    PrintAndLogEx(SUCCESS, "PIT %u", piir);
+    return PM3_SUCCESS;
+}
+
 static int CmdPing(const char *Cmd) {
     CLIParserContext *ctx;
     CLIParserInit(&ctx, "hw ping",
@@ -2098,6 +2114,7 @@ static command_t CommandTable[] = {
     {"lcd", CmdLCD, IfPm3Lcd, "Send command/data to LCD"},
     {"lcdreset", CmdLCDReset, IfPm3Lcd, "Hardware reset LCD"},
     {"ping", CmdPing, IfPm3Present, "Test if the Proxmark3 is responsive"},
+    {"pit", CmdPit, IfPm3Present, "EXPERIMENT: read the free-running PIT count (crystal timing)"},
     {"powersave", CmdPowerSave, IfPm5, "Enable/disable the PM5 power-save idle"},
     {"readmem", CmdReadmem, IfPm3Present, "Read from MCU flash"},
     {"reset", CmdReset, IfPm3Present, "Reset the device"},
