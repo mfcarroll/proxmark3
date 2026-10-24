@@ -847,6 +847,8 @@ typedef struct {
 #define CMD_BREAK_LOOP 0x0118
 #define CMD_SET_TEAROFF 0x0119
 #define CMD_SET_HF_FIELD_TIMEOUT 0x011A
+// research: free-running TC0/TC1 tick count (MCK/32 = 1.5 MHz, crystal-derived) for timing against a host clock
+#define CMD_HW_TICKS 0x011B
 #define CMD_GET_DBGMODE 0x0120
 
 // RDV40, Flash memory operations

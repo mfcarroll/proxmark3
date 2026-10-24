@@ -4121,6 +4121,20 @@ static void PacketReceived(PacketCommandNG *packet) {
             reply_ng(CMD_PING, PM3_SUCCESS, packet->data.asBytes, packet->length);
             break;
         }
+        case CMD_HW_TICKS: {
+            // u8 0 start / 1 read / 2 stop -> u32 ticks (LE). Any other command that uses
+            // StartTicks()/StopTicks() resets or stops the count, so run nothing else meanwhile.
+            uint8_t sub = (packet->length > 0) ? packet->data.asBytes[0] : 1;
+            if (sub == 0) {
+                StartTicks();
+            }
+            uint32_t t = GetTicks();
+            if (sub == 2) {
+                StopTicks();
+            }
+            reply_ng(CMD_HW_TICKS, PM3_SUCCESS, (uint8_t *)&t, sizeof(t));
+            break;
+        }
 #ifdef WITH_LCD
         case CMD_LCD_RESET: {
             LCDReset();
