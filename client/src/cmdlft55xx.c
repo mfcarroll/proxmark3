@@ -545,6 +545,11 @@ bool t55xxVerifyWrite(uint8_t block, bool page1, bool usepwd, uint8_t override, 
 
 int t55xxWrite(uint8_t block, bool page1, bool usepwd, bool testMode, uint32_t password, uint8_t downlink_mode, uint32_t data) {
 
+    // a new block 0 can change the PWD bit, so the last detect no longer confirms a password
+    if (block == T55x7_CONFIGURATION_BLOCK && page1 == false) {
+        config.pwd_known = false;
+    }
+
     uint8_t flags;
     flags  = (usepwd)   ? 0x1 : 0;
     flags |= (page1)    ? 0x2 : 0;
@@ -822,7 +827,7 @@ int T55xxReadBlockEx(uint8_t block, bool page1, bool usepwd, uint8_t override, u
         // override = 2 (override and no display)
         if (override == 0) {
             // A live detect (lf t55xx detect -p) that recovered this password already confirmed the PWD bit is set.
-            bool detect_confirmed_pwd = (config.pwd_known && config.usepwd && config.pwd == password);
+            bool detect_confirmed_pwd = (config.pwd_known && config.pwd_bit && config.pwd == password);
 
             if (detect_confirmed_pwd == false) {
                 if (AcquireData(T55x7_PAGE0, T55x7_CONFIGURATION_BLOCK, false, 0, downlink_mode) == false)
@@ -864,6 +869,14 @@ int T55xxReadBlockEx(uint8_t block, bool page1, bool usepwd, uint8_t override, u
     }
 
     return PM3_SUCCESS;
+}
+
+// a tag in password mode answers a read without the password with its regular-read broadcast
+static void t55xx_warn_no_pwd(void) {
+    if (config.pwd_known && config.pwd_bit) {
+        PrintAndLogEx(WARNING, "Detect found the PWD bit set. Without the password, the read returns the regular-read broadcast, not the block");
+        PrintAndLogEx(HINT, "Hint: try adding " _YELLOW_("-p %08X"), config.pwd);
+    }
 }
 
 static int CmdT55xxReadBlock(const char *Cmd) {
@@ -932,6 +945,10 @@ static int CmdT55xxReadBlock(const char *Cmd) {
     if (block > 7 && block != REGULAR_READ_MODE_BLOCK) {
         PrintAndLogEx(NORMAL, "Block must be between 0 and 7");
         return PM3_ESOFT;
+    }
+
+    if (usepwd == false && block != REGULAR_READ_MODE_BLOCK) {
+        t55xx_warn_no_pwd();
     }
 
     printT5xxHeader(page1);
@@ -1253,6 +1270,7 @@ static int CmdT55xxDetect(const char *Cmd) {
     // password mode gates direct access, so a live detect tells us which mode
     // the tag is in.  set before the narrowing below, which uses it
     config.pwd_known = (found && use_gb == false);
+    config.pwd_bit = config.usepwd;
 
     uint8_t nblk = 0;
     bool psk2_out = false, favoured = false;
@@ -2517,7 +2535,7 @@ static size_t t55xx_psk3_resolve(uint8_t nblk, uint32_t *only) {
         }
 
         // and the password bit has to match the mode the detect succeeded in
-        if (config.pwd_known && ((((cand[i] >> 4) & 1) != 0) != config.usepwd)) {
+        if (config.pwd_known && ((((cand[i] >> 4) & 1) != 0) != config.pwd_bit)) {
             continue;
         }
         if (mb != 0 && (mb % nblk) == 0) {
@@ -3156,7 +3174,7 @@ int printConfiguration(t55xx_conf_block_t b) {
         if (b.pwd_known) {
             size_t kept = 0;
             for (size_t i = 0; i < ncand; i++) {
-                if ((((cand[i] >> 4) & 1) != 0) == b.usepwd) {
+                if ((((cand[i] >> 4) & 1) != 0) == b.pwd_bit) {
                     cand[kept++] = cand[i];
                 }
             }
@@ -3984,6 +4002,10 @@ static int CmdT55xxDump(const char *Cmd) {
         downlink_mode = ref1of4;
 
     bool success = true;
+
+    if (usepwd == false) {
+        t55xx_warn_no_pwd();
+    }
 
     PrintAndLogEx(NORMAL, "");
     PrintAndLogEx(INFO, "------------------------- " _CYAN_("T55xx tag memory") " -----------------------------");
